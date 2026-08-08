@@ -1,12 +1,13 @@
 """
-Stitches the composited BeReals into a single MP4, oldest first.
+Stitches the exported BeReals into a single MP4, oldest first.
 
-Reads the `_composited` images produced by bereal_exporter.py, normalizes them
-to one frame size and pipes them to ffmpeg. Frames are ordered by the timestamp
-in the filename, so the result runs chronologically.
+Reads the images produced by bereal_exporter.py, normalizes them to one frame
+size and pipes them to ffmpeg. Frames are ordered by the timestamp in the
+filename, so the result runs chronologically.
 
 Usage:
     python make_video.py                          # every composited BeReal
+    python make_video.py --view selfie-view       # front camera only
     python make_video.py --year 2024
     python make_video.py --fps 15 --date-label
     python make_video.py --limit 100 -o test.mp4  # quick preview
@@ -28,6 +29,18 @@ from tqdm import tqdm
 
 # Filenames are written as YYYY-MM-DD_HH-MM-SS_composited.ext
 FILENAME_FORMAT = "%Y-%m-%d_%H-%M-%S"
+
+# View suffix -> the folder organize_output.py sorts it into.
+VIEWS = {
+    "composited": "composited",
+    "main-view": "main-view",
+    "selfie-view": "selfie-view",
+}
+
+# BeReal's archive holds the odd video post, which sits in the view folders
+# alongside the stills. Pillow can't open those, so leave them out rather than
+# letting them become black frames.
+IMAGE_EXTENSIONS = {".webp", ".jpg", ".jpeg", ".png", ".heic", ".gif", ".bmp", ".tiff"}
 
 FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -54,8 +67,15 @@ def init_parser() -> argparse.Namespace:
         "-s",
         "--source",
         action="append",
-        help="Folder of composited images (repeatable)\n"
-        "Default: <out-path>/composited, falling back to <out-path>/posts",
+        help="Folder of images to read (repeatable)\n"
+        "Default: <out-path>/<view>, falling back to <out-path>/posts",
+    )
+    parser.add_argument(
+        "--view",
+        type=str,
+        default="composited",
+        choices=sorted(VIEWS),
+        help="Which view to stitch (default composited)",
     )
     parser.add_argument(
         "-o",
@@ -147,43 +167,47 @@ def init_time_span(args: argparse.Namespace) -> tuple:
     return dt.fromtimestamp(0), dt.now()
 
 
-def find_sources(out_path: str, sources: list) -> list:
+def find_sources(out_path: str, sources: list, view: str) -> list:
     """
     Works out which folders to read frames from.
 
-    organize_output.py moves the composited images into their own folder, so
-    look there first and fall back to the unsorted posts folder.
+    organize_output.py moves each view into its own folder, so look there first
+    and fall back to the unsorted posts folder.
     """
     if sources:
         return [s.rstrip("/") for s in sources]
 
-    for folder in ("composited", "posts"):
+    for folder in (VIEWS[view], "posts"):
         candidate = os.path.join(out_path, folder)
-        if os.path.isdir(candidate) and glob.glob(os.path.join(candidate, "*_composited.*")):
+        if os.path.isdir(candidate) and glob.glob(os.path.join(candidate, f"*_{view}.*")):
             return [candidate]
 
     raise FileNotFoundError(
-        f"No composited images found in {out_path}. Run bereal_exporter.py first, "
+        f"No {view} images found in {out_path}. Run bereal_exporter.py first, "
         "or point --source at the folder holding them."
     )
 
 
-def collect_frames(sources: list, time_span: tuple) -> list:
+def collect_frames(sources: list, time_span: tuple, view: str) -> list:
     """
-    Returns the composited images in chronological order.
+    Returns the images for one view in chronological order.
 
     The timestamp is taken from the filename rather than EXIF - it's already
     local time, and reading it costs nothing.
     """
     frames = []
     unreadable = 0
+    non_images = 0
 
     for source in sources:
         if not os.path.isdir(source):
             raise FileNotFoundError(f"Source folder not found: {source}")
 
-        for path in glob.glob(os.path.join(source, "*_composited.*")):
-            stamp = os.path.basename(path).split("_composited")[0]
+        for path in glob.glob(os.path.join(source, f"*_{view}.*")):
+            if os.path.splitext(path)[1].lower() not in IMAGE_EXTENSIONS:
+                non_images += 1
+                continue
+            stamp = os.path.basename(path).split(f"_{view}")[0]
             try:
                 taken_at = dt.strptime(stamp, FILENAME_FORMAT)
             except ValueError:
@@ -194,6 +218,8 @@ def collect_frames(sources: list, time_span: tuple) -> list:
 
     if unreadable:
         print(f"Ignored {unreadable} files whose name isn't a timestamp")
+    if non_images:
+        print(f"Skipped {non_images} video BeReals, which can't be used as frames")
 
     frames.sort()
     return frames
@@ -359,7 +385,10 @@ def build_video(frames, size, output, fps, encoder_args, ffmpeg, max_workers, fo
 if __name__ == "__main__":
     args = init_parser()
     out_path = args.out_path.rstrip("/")
-    output = args.output or os.path.join(out_path, "bereals.mp4")
+    # Name the file after the view, so stitching a second one doesn't quietly
+    # replace the video you already made.
+    default_name = "bereals.mp4" if args.view == "composited" else f"bereals-{args.view}.mp4"
+    output = args.output or os.path.join(out_path, default_name)
 
     ffmpeg = args.ffmpeg_path or shutil.which("ffmpeg")
     if not ffmpeg:
@@ -371,14 +400,14 @@ if __name__ == "__main__":
 
     try:
         time_span = init_time_span(args)
-        sources = find_sources(out_path, args.source)
-        frames = collect_frames(sources, time_span)
+        sources = find_sources(out_path, args.source, args.view)
+        frames = collect_frames(sources, time_span, args.view)
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
         exit(1)
 
     if not frames:
-        print("No composited BeReals found in that time range.")
+        print(f"No {args.view} BeReals found in that time range.")
         exit(1)
 
     if args.limit:

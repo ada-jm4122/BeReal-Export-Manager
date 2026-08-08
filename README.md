@@ -119,9 +119,20 @@ python make_video.py --year 2024 --date-label # one year, date burned into each 
 python make_video.py --limit 100 -o test.mp4  # quick preview before committing to the lot
 ```
 
-It reads `output/composited/` if you've run `organize_output.py`, otherwise the `_composited` files in `output/posts/`. Frames are ordered by the timestamp in the filename and normalized to one size (by default whichever size most of your images already are, so the bulk pass through untouched).
+It reads `output/composited/` if you've run `organize_output.py`, otherwise the `_composited` files in `output/posts/`. Frames are ordered by the timestamp in the filename and normalized to one size (by default whichever size most of your images already are, so the bulk pass through untouched). Any video BeReals in the folder are skipped - they can't be used as single frames.
 
 Useful flags: `--size WxH`, `--crf` (quality, lower is bigger), `--timespan`, `--max-workers`.
+
+### One camera on its own
+
+`--view` picks which of the three exports to stitch, so you can make a video of just the front camera - 2,000 selfies from the same phone at arm's length, which lines up far more consistently than the back camera does:
+
+```sh
+python make_video.py --view selfie-view   # -> output/bereals-selfie-view.mp4
+python make_video.py --view main-view     # -> output/bereals-main-view.mp4
+```
+
+The default filename follows the view, so these never overwrite each other or your `bereals.mp4`.
 
 ### Picking a speed
 
