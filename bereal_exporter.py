@@ -67,6 +67,14 @@ def init_parser() -> argparse.Namespace:
         help="Maximum number of parallel workers (default 4)",
     )
     parser.add_argument(
+        "--overwrite",
+        dest="overwrite",
+        default=False,
+        action="store_true",
+        help="Re-export images that already exist in the output folder\n"
+        "(by default they're left alone, so an interrupted run resumes)",
+    )
+    parser.add_argument(
         "--no-memories",
         dest="memories",
         default=True,
@@ -141,6 +149,7 @@ class BeRealExporter:
         self.max_workers = args.max_workers
         self.interactive_conversations = args.interactive_conversations
         self.web_ui = args.web_ui
+        self.overwrite = args.overwrite
 
         # One TimezoneFinder per worker thread. Constructing it costs ~550ms
         # because it parses the whole timezone boundary dataset, so building a
@@ -253,81 +262,145 @@ class BeRealExporter:
         local_dt = utc_dt.astimezone(local_tz)
         return local_dt.replace(tzinfo=None)
 
-    def process_memory(self, memory, out_path_memories):
+    @staticmethod
+    def normalize_bereal(record: dict, source: str) -> dict:
         """
-        Processes a single memory (for parallel execution).
-        Saves to posts folder and skips if files already exist to avoid duplicates.
-        """
-        memory_dt = self.get_datetime_from_str(memory["takenTime"])
-        if not (self.time_span[0] <= memory_dt <= self.time_span[1]):
-            return None
+        Flattens a memories.json or posts.json entry into one common shape.
 
-        # Get front and back image paths
-        front_path = os.path.join(self.bereal_path, memory["frontImage"]["path"])
-        back_path = os.path.join(self.bereal_path, memory["backImage"]["path"])
-        
+        The two files describe the same BeReals with different key names:
+          memories: backImage / frontImage / takenTime
+          posts:    primary   / secondary  / takenAt
+        Back camera is the main view, front camera is the selfie overlay.
+        """
+        if source == "memories":
+            primary, secondary, time_key = "backImage", "frontImage", "takenTime"
+        else:
+            primary, secondary, time_key = "primary", "secondary", "takenAt"
+
+        return {
+            # Parsed here so the merge can match the two lists on the moment
+            # itself rather than on however each of them formatted it.
+            "taken_at": BeRealExporter.get_datetime_from_str(record[time_key]),
+            # A handful of records are missing one of the two images entirely.
+            "primary": (record.get(primary) or {}).get("path"),
+            "secondary": (record.get(secondary) or {}).get("path"),
+            "location": record.get("location"),
+            "source": source,
+        }
+
+    @staticmethod
+    def bereal_key(record: dict):
+        """
+        Identity of a BeReal, used to merge the memories and posts lists.
+
+        Both the image paths and the timestamp, because memories.json can list
+        the same pair of images twice under different times - those stay as two
+        separate BeReals, the same as before the lists were merged.
+        """
+        return (record["primary"], record["secondary"], record["taken_at"])
+
+    def merge_bereals(self, memories: list, posts: list) -> list:
+        """
+        Merges memories and posts into one list with each BeReal appearing once.
+
+        memories.json and posts.json are two views of the same set, so exporting
+        both processed every image twice. Memories win on conflict (they carry
+        the richer metadata), but a post can still fill in a location the
+        matching memory lacks.
+        """
+        merged = {}
+        skipped = 0
+
+        for record, source in [(m, "memories") for m in memories] + [
+            (p, "posts") for p in posts
+        ]:
+            try:
+                normalized = self.normalize_bereal(record, source)
+            except (KeyError, ValueError) as e:
+                skipped += 1
+                self.verbose_msg(f"Skipping unreadable {source} entry: {e}")
+                continue
+
+            key = self.bereal_key(normalized)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = normalized
+            elif not existing["location"] and normalized["location"]:
+                existing["location"] = normalized["location"]
+
+        duplicates = len(memories) + len(posts) - skipped - len(merged)
+        if duplicates:
+            print(
+                f"Merged {len(memories)} memories and {len(posts)} posts into "
+                f"{len(merged)} BeReals ({duplicates} duplicates skipped)"
+            )
+        return list(merged.values())
+
+    def output_exists(self, path: str) -> bool:
+        """
+        Checks whether an output image is already on disk.
+
+        export_img rewrites the extension when the source turns out to be a JPEG,
+        so a .webp we asked for may have landed as a .jpg.
+        """
+        if os.path.exists(path):
+            return True
+        base, ext = os.path.splitext(path)
+        alternative = ".jpg" if ext == ".webp" else ".webp"
+        return os.path.exists(base + alternative)
+
+    def process_bereal(self, bereal, out_path_bereals):
+        """
+        Processes a single BeReal (for parallel execution).
+
+        Writes the back camera as the main view, the front camera as the selfie
+        view, and the two combined as the composite. Existing files are left
+        alone unless --overwrite was passed, so re-running an interrupted export
+        only does the work that's left.
+        """
+        bereal_dt = bereal["taken_at"]
+
         # Convert to local time for filename (to match EXIF metadata)
-        img_location = memory.get("location", None)
-        local_dt = self.convert_to_local_time(memory_dt, img_location)
-        
+        img_location = bereal["location"]
+        local_dt = self.convert_to_local_time(bereal_dt, img_location)
+
         # Create output filenames with descriptive names
         base_filename = f"{local_dt.strftime('%Y-%m-%d_%H-%M-%S')}"
-        secondary_output = f"{out_path_memories}/{base_filename}_selfie-view.webp"  # front camera
-        primary_output = f"{out_path_memories}/{base_filename}_main-view.webp"     # back camera
-        composite_output = f"{out_path_memories}/{base_filename}_composited.webp"
-        
-        # Skip if files already exist (avoid duplicates from posts)
-        if os.path.exists(primary_output) and os.path.exists(secondary_output) and os.path.exists(composite_output):
-            self.verbose_msg(f"Skipping {base_filename} - already exists from posts export")
-            return f"{base_filename} (skipped - duplicate)"
-        
-        # Export individual images (front=secondary, back=primary)
-        if not os.path.exists(secondary_output):
-            self.export_img(front_path, secondary_output, memory_dt, img_location)
-        if not os.path.exists(primary_output):
-            self.export_img(back_path, primary_output, memory_dt, img_location)
-        
-        # Create composite image (back/primary as background, front/secondary as overlay - BeReal style)
-        if not os.path.exists(composite_output) and os.path.exists(secondary_output) and os.path.exists(primary_output):
-            self.create_composite_image(primary_output, secondary_output, composite_output, memory_dt, img_location)
+        primary_output = f"{out_path_bereals}/{base_filename}_main-view.webp"    # back camera
+        secondary_output = f"{out_path_bereals}/{base_filename}_selfie-view.webp"  # front camera
+        composite_output = f"{out_path_bereals}/{base_filename}_composited.webp"
 
-        return base_filename
+        def needs_export(path):
+            return self.overwrite or not self.output_exists(path)
 
-    def process_post(self, post, out_path_posts):
-        """
-        Processes a single post (for parallel execution).
-        """
-        post_dt = self.get_datetime_from_str(post["takenAt"])
-        if not (self.time_span[0] <= post_dt <= self.time_span[1]):
-            return None
+        if not any(needs_export(p) for p in (primary_output, secondary_output, composite_output)):
+            self.verbose_msg(f"Skipping {base_filename} - already exported")
+            return f"{base_filename} (skipped)"
 
-        # Get primary and secondary image paths
-        primary_path = os.path.join(self.bereal_path, post["primary"]["path"])
-        secondary_path = os.path.join(self.bereal_path, post["secondary"]["path"])
-        
-        # Convert to local time for filename (to match EXIF metadata)
-        post_location = post.get("location", None)
-        local_dt = self.convert_to_local_time(post_dt, post_location)
-        
-        # Create output filename
-        base_filename = f"{local_dt.strftime('%Y-%m-%d_%H-%M-%S')}"
-        
-        # Export individual images
-        primary_output = f"{out_path_posts}/{base_filename}_main-view.webp"
-        secondary_output = f"{out_path_posts}/{base_filename}_selfie-view.webp"
-        composite_output = f"{out_path_posts}/{base_filename}_composited.webp"
-        
+        if bereal["primary"] and needs_export(primary_output):
+            self.export_img(
+                os.path.join(self.bereal_path, bereal["primary"]),
+                primary_output,
+                bereal_dt,
+                img_location,
+            )
+        if bereal["secondary"] and needs_export(secondary_output):
+            self.export_img(
+                os.path.join(self.bereal_path, bereal["secondary"]),
+                secondary_output,
+                bereal_dt,
+                img_location,
+            )
 
-        
-        # Export primary image
-        self.export_img(primary_path, primary_output, post_dt, post_location)
-        
-        # Export secondary image  
-        self.export_img(secondary_path, secondary_output, post_dt, post_location)
-        
-        # Create composite image
-        if os.path.exists(primary_output) and os.path.exists(secondary_output):
-            self.create_composite_image(primary_output, secondary_output, composite_output, post_dt, post_location)
+        # Composite the two (back as background, front overlaid - BeReal style)
+        if (
+            needs_export(composite_output)
+            and os.path.exists(primary_output)
+            and os.path.exists(secondary_output)
+        ):
+            self.create_composite_image(
+                primary_output, secondary_output, composite_output, bereal_dt, img_location
+            )
 
         return base_filename
 
@@ -1166,59 +1239,62 @@ class BeRealExporter:
                             except Exception:
                                 pass
 
-    def export_memories(self, memories: list):
+    def export_bereals(self, memories: list, posts: list):
         """
-        Exports all memories to the posts folder to avoid duplicates.
-        
+        Exports every BeReal once, from the merged memories and posts lists.
+
         MEMORIES vs POSTS:
-        - Often contain the same images with different metadata formats
-        - Memories: frontImage/backImage, takenTime, berealMoment, location data
-        - Posts: primary/secondary, takenAt, limited metadata
-        - Combined into posts folder to avoid duplication
-        
-        Creates composite images with backImage as primary and frontImage overlaid (BeReal style).
-        Uses parallel processing for faster execution.
+        - Two views of the same set of BeReals, in different key names
+        - Memories: frontImage/backImage, takenTime, berealMoment, isLate, location
+        - Posts: primary/secondary, takenAt, retakeCounter, visibility
+        - Merged on image path so each BeReal is only processed once - exporting
+          both lists separately doubled the runtime for no extra output
+
+        Creates composite images with the back camera as background and the front
+        camera overlaid (BeReal style). Uses parallel processing for speed.
         """
-        out_path_memories = os.path.join(self.out_path, "posts")  # Use posts folder
-        os.makedirs(out_path_memories, exist_ok=True)
+        out_path_bereals = os.path.join(self.out_path, "posts")
+        os.makedirs(out_path_bereals, exist_ok=True)
 
-        # Filter memories within time span first
-        valid_memories = []
-        for memory in memories:
-            memory_dt = self.get_datetime_from_str(memory["takenTime"])
-            if self.time_span[0] <= memory_dt <= self.time_span[1]:
-                valid_memories.append(memory)
+        bereals = self.merge_bereals(memories, posts)
 
-        if not valid_memories:
-            self.verbose_msg("No memories found in the specified time range")
+        # Filter to those within the time span first
+        valid_bereals = [
+            bereal
+            for bereal in bereals
+            if self.time_span[0] <= bereal["taken_at"] <= self.time_span[1]
+        ]
+
+        if not valid_bereals:
+            self.verbose_msg("No BeReals found in the specified time range")
             return
 
-        self.verbose_msg(f"Processing {len(valid_memories)} memories with {self.max_workers} workers (saving to posts folder)...")
+        self.verbose_msg(f"Processing {len(valid_bereals)} BeReals with {self.max_workers} workers...")
 
-        # Process memories in parallel with progress bar
+        # Process in parallel with progress bar
         with logging_redirect_tqdm() if self.verbose else tqdm(disable=False):
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 # Submit all tasks
-                future_to_memory = {
-                    executor.submit(self.process_memory, memory, out_path_memories): i 
-                    for i, memory in enumerate(valid_memories, 1)
+                future_to_bereal = {
+                    executor.submit(self.process_bereal, bereal, out_path_bereals): i
+                    for i, bereal in enumerate(valid_bereals, 1)
                 }
-                
+
                 # Process completed tasks with progress bar
-                with tqdm(total=len(valid_memories), desc="Exporting memories", unit="memory", 
+                with tqdm(total=len(valid_bereals), desc="Exporting BeReals", unit="bereal",
                          leave=True, position=0) as pbar:
-                    for future in as_completed(future_to_memory):
-                        memory_index = future_to_memory[future]
+                    for future in as_completed(future_to_bereal):
+                        bereal_index = future_to_bereal[future]
                         try:
                             result = future.result()
                             if result:
                                 pbar.set_postfix_str(f"Latest: {result}")
                             pbar.update(1)
                         except Exception as e:
-                            tqdm.write(f"Error processing memory {memory_index}: {e}")
+                            tqdm.write(f"Error processing BeReal {bereal_index}: {e}")
                             pbar.update(1)
 
-        self.verbose_msg(f"Completed exporting {len(valid_memories)} memories")
+        self.verbose_msg(f"Completed exporting {len(valid_bereals)} BeReals")
 
     def export_realmojis(self, realmojis: list):
         """
@@ -1255,60 +1331,6 @@ class BeRealExporter:
                     )
                     self.export_img(old_img_name, img_name, realmoji_dt, None)
                     pbar.set_postfix_str(f"Latest: {local_dt.strftime('%Y-%m-%d_%H-%M-%S')}")
-
-    def export_posts(self, posts: list):
-        """
-        Exports all posts from the Photos directory to the corresponding output folder.
-        
-        POSTS vs MEMORIES:
-        - Posts: Older BeReal format with basic metadata (single timestamp, less location data)
-        - Memories: More recent format with rich metadata (location, multiple timestamps)
-        - Posts have: primary/secondary images, takenAt timestamp, limited metadata
-        - Memories have: frontImage/backImage, takenTime/berealMoment, location data
-        
-        Creates composite images with primary as background and secondary overlaid (BeReal style).
-        Uses parallel processing for faster execution.
-        """
-        out_path_posts = os.path.join(self.out_path, "posts")
-        os.makedirs(out_path_posts, exist_ok=True)
-
-        # Filter posts within time span first
-        valid_posts = []
-        for post in posts:
-            post_dt = self.get_datetime_from_str(post["takenAt"])
-            if self.time_span[0] <= post_dt <= self.time_span[1]:
-                valid_posts.append(post)
-
-        if not valid_posts:
-            self.verbose_msg("No posts found in the specified time range")
-            return
-
-        self.verbose_msg(f"Processing {len(valid_posts)} posts with {self.max_workers} workers...")
-
-        # Process posts in parallel with progress bar
-        with logging_redirect_tqdm() if self.verbose else tqdm(disable=False):
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Submit all tasks
-                future_to_post = {
-                    executor.submit(self.process_post, post, out_path_posts): i 
-                    for i, post in enumerate(valid_posts, 1)
-                }
-                
-                # Process completed tasks with progress bar
-                with tqdm(total=len(valid_posts), desc="Exporting posts", unit="post",
-                         leave=True, position=0) as pbar:
-                    for future in as_completed(future_to_post):
-                        post_index = future_to_post[future]
-                        try:
-                            result = future.result()
-                            if result:
-                                pbar.set_postfix_str(f"Latest: {result}")
-                            pbar.update(1)
-                        except Exception as e:
-                            tqdm.write(f"Error processing post {post_index}: {e}")
-                            pbar.update(1)
-
-        self.verbose_msg(f"Completed exporting {len(valid_posts)} posts")
 
     def export_conversations(self):
         """
@@ -1563,29 +1585,24 @@ if __name__ == "__main__":
         print(f"Error: {e}")
         exit(1)
 
-    if args.memories:
+    def load_json(filename: str) -> list:
+        path = os.path.join(exporter.bereal_path, filename)
+        if not os.path.exists(path):
+            print(f"{filename} not found, skipping it.")
+            return []
         try:
-            memories_path = os.path.join(exporter.bereal_path, "memories.json")
-            if os.path.exists(memories_path):
-                with open(memories_path, encoding="utf-8") as f:
-                    memories = json.load(f)
-                    exporter.export_memories(memories)
-            else:
-                print("memories.json file not found, skipping memories export.")
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
         except json.JSONDecodeError:
-            print("Error decoding memories.json file.")
+            print(f"Error decoding {filename} file.")
+            return []
 
-    if args.posts:
-        try:
-            posts_path = os.path.join(exporter.bereal_path, "posts.json")
-            if os.path.exists(posts_path):
-                with open(posts_path, encoding="utf-8") as f:
-                    posts = json.load(f)
-                    exporter.export_posts(posts)
-            else:
-                print("posts.json file not found, skipping posts export.")
-        except json.JSONDecodeError:
-            print("Error decoding posts.json file.")
+    # memories.json and posts.json describe the same BeReals, so they're merged
+    # and exported in a single pass rather than one after the other.
+    memories = load_json("memories.json") if args.memories else []
+    posts = load_json("posts.json") if args.posts else []
+    if memories or posts:
+        exporter.export_bereals(memories, posts)
 
     if args.realmojis:
         try:
