@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import glob
+import threading
 from datetime import datetime as dt
 from shutil import copy2 as cp
 from PIL import Image, ImageDraw
@@ -140,7 +141,13 @@ class BeRealExporter:
         self.max_workers = args.max_workers
         self.interactive_conversations = args.interactive_conversations
         self.web_ui = args.web_ui
-        
+
+        # One TimezoneFinder per worker thread. Constructing it costs ~550ms
+        # because it parses the whole timezone boundary dataset, so building a
+        # fresh one per photo dominated the runtime. TimezoneFinder is not
+        # thread-safe, hence thread-local rather than a single shared instance.
+        self._tz_local = threading.local()
+
         # Setup logging for clean progress bars
         if self.verbose:
             logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -201,6 +208,16 @@ class BeRealExporter:
         if self.verbose and self.logger:
             self.logger.info(msg)
 
+    def get_timezone_finder(self) -> TimezoneFinder:
+        """
+        Returns this thread's TimezoneFinder, creating it on first use.
+        """
+        tf = getattr(self._tz_local, "finder", None)
+        if tf is None:
+            tf = TimezoneFinder()
+            self._tz_local.finder = tf
+        return tf
+
     def convert_to_local_time(self, utc_dt: dt, location=None) -> dt:
         """
         Converts UTC datetime to local timezone based on location or defaults to Europe/London.
@@ -217,7 +234,7 @@ class BeRealExporter:
         # Try to get timezone from location if available
         if location and "latitude" in location and "longitude" in location:
             try:
-                tf = TimezoneFinder()
+                tf = self.get_timezone_finder()
                 timezone_str = tf.timezone_at(
                     lat=location["latitude"], 
                     lng=location["longitude"]
