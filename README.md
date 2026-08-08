@@ -9,13 +9,13 @@ I'm gonna be upfront and say it's BeReal's fault the dates are wonky on the outp
         "takenTime": "2024-12-24T01:27:16.726Z",
         "berealMoment": "2024-12-23T22:39:05.327Z",
 
-instead of the way everyone else always does it with UNIX Epoch time, but it makes it pretty hard to find out what time the picture was taken, and to properly tag the photos with the correct time. The script now handles timezone conversion automatically using GPS coordinates when available, falling back to Europe/London timezone.
+instead of the way everyone else always does it with UNIX Epoch time, but it makes it pretty hard to find out what time the picture was taken, and to properly tag the photos with the correct time. The script works the real local time out from the GPS coordinates on each photo - see [Timezones](#timezones) for the cases where it can't.
 
 ## Installation
 
 1. Clone the repository:
     ```sh
-    git@github.com:SoPat712/BeReal-Export-Manager.git 
+    git clone https://github.com/ada-jm4122/BeReal-Export-Manager.git
     cd BeReal-Export-Manager
     ```
 
@@ -24,18 +24,70 @@ instead of the way everyone else always does it with UNIX Epoch time, but it mak
     pip install -r requirements.txt
     ```
 
-3. Ensure you have `exiftool` installed on your system and set it up as a `PATH` variable. You can download it [here](https://exiftool.org/).
+3. Install `exiftool` and make sure it's on your `PATH`. This is **required**, not optional - the script writes all its metadata through it and will fail immediately without it.
+    - Linux / WSL: `sudo apt install libimage-exiftool-perl`
+    - macOS: `brew install exiftool`
+    - Windows: download from [exiftool.org](https://exiftool.org/), or skip the PATH setup and pass `--exiftool-path C:\path\to\exiftool.exe`
 
-4. Put your BeReal export folder in the `input` directory. The script will automatically find it.
+    Check it worked:
+    ```sh
+    exiftool -ver
+    ```
+
+## Which BeReal download do I need?
+
+When you request your data, BeReal may send you **two different files**. Only one of them is any use here:
+
+| File | What it is | Use it? |
+|---|---|---|
+| A large `.zip` (hundreds of MB or more) named like `<userid>-<random>.zip` | Your actual photos plus `posts.json` / `memories.json` / `realmojis.json` | **Yes** |
+| A small `<userid>_<timestamp>.json.gz` (tens of KB) | Analytics/telemetry - a log of `applicationOpened` events, your device model, and city-level location history. No photos at all. | No - ignore it |
+
+If your download is only a few KB and unzips to lines of `{"event_type":"applicationOpened",...}`, that's the telemetry file. The photo archive is a separate download - check your other BeReal emails.
+
+## Setting up the input folder
+
+The script looks for a **subfolder** inside `input/`, so your export must sit one level deep. Note that BeReal's zip has *no wrapping folder* of its own - everything is at the zip root - so unzip it into a folder you create yourself:
+
+```sh
+mkdir -p input/export
+unzip -o your-bereal-export.zip -d input/export
+```
+
+You should end up with this:
+
+```
+input/
+└── export/            <- name doesn't matter, but this level must exist
+    ├── memories.json
+    ├── posts.json
+    ├── realmojis.json
+    ├── Photos/
+    │   ├── post/
+    │   └── realmoji/
+    └── conversations/
+        └── <conversation_id>/
+```
+
+Two things to know:
+
+- **Don't unzip straight into `input/`.** If `memories.json` lands at `input/memories.json` the script only scans *subdirectories* and will fail with `No BeReal export folder found in input directory`.
+- **Use `unzip -o`.** BeReal's archive contains *two different files both named `realmojis.json`* - a small one (your pinned instant realmojis) and a large one (your actual reactions). Without `-o`, unzip stops to ask you about the collision. With it, the larger correct one wins.
+
+Only one export folder should be in `input/` at a time. If there are two, which one gets picked is arbitrary.
 
 ## Usage
 
-Put your BeReal export in the `input` folder and run:
+Once your export is in place:
 ```sh
 python bereal_exporter.py [OPTIONS]
 ```
 
-The script automatically finds your export folder and processes everything in parallel for speed.
+That processes everything - posts, memories, realmojis and conversations - in parallel, writing to `./output`. A full export of a few thousand BeReals takes on the order of an hour or two, so consider testing on a single year first:
+
+```sh
+python bereal_exporter.py --year 2024
+```
 
 ## Options
 
@@ -43,6 +95,7 @@ The script automatically finds your export folder and processes everything in pa
 - `-t, --timespan`: Exports the given timespan. 
   - Valid format: `DD.MM.YYYY-DD.MM.YYYY`.
   - Wildcards can be used: `DD.MM.YYYY-*`.
+  - Both dates are read as midnight, so the end date is effectively **exclusive** - `01.07.2026-04.07.2026` will not include a BeReal taken at 00:30 on the 4th. Set the end a day later than you think you need.
 - `-y, --year`: Exports the given year.
 - `-p, --out-path`: Set a custom output path (default is `./output`).
 - `--input-path`: Set the input folder path containing BeReal export (default `./input`).
@@ -56,7 +109,17 @@ The script automatically finds your export folder and processes everything in pa
 - `--interactive-conversations`: Manually choose front/back camera for conversation images.
 - `--web-ui`: Use web UI for interactive conversation selection (requires `--interactive-conversations`).
 
-The script automatically handles timezone conversion using GPS coordinates when available, falling back to Europe/London. It creates composite images with the back camera as the main image and front camera overlaid in the corner with rounded edges and a black border, just like BeReal shows them.
+## Timezones
+
+Each photo's timestamp is worked out from the GPS coordinates BeReal recorded with it, so it comes out in whatever timezone you were actually standing in.
+
+Not every record has GPS though - realmojis never do, and a fraction of memories don't either. Those fall back to a **hardcoded default of `Europe/London`**. If you don't live in the UK, change this line in `bereal_exporter.py` before you run anything, or those photos will be stamped with the wrong time (and, if taken near midnight, the wrong day):
+
+```python
+local_tz = pytz.timezone('Europe/London')
+```
+
+There's no command-line flag for it yet.
 
 ## Examples
 
@@ -80,9 +143,10 @@ The script automatically handles timezone conversion using GPS coordinates when 
     python bereal_exporter.py --out-path /path/to/output
     ```
 
-5. Use a different input folder:
+5. Use a different input folder. Point this at the folder *containing* your export folder, not at the export itself - the script still expects one level of nesting:
     ```sh
-    python bereal_exporter.py --input-path /path/to/bereal/export
+    # if your export lives at /media/backup/bereal/export/memories.json
+    python bereal_exporter.py --input-path /media/backup/bereal
     ```
 
 6. Use portable exiftool:
@@ -134,19 +198,30 @@ The web UI is pretty nice - shows both images side by side, you click the one th
 
 ## What Gets Exported
 
-The script exports different types of content to organized folders:
+You get this in `output/`:
 
-- **Posts**: Your daily BeReal posts (main-view/selfie-view images + composited versions)
-- **Memories**: Same as posts but with richer metadata (location, multiple timestamps)
-- **Realmojis**: Your reaction images
-- **Conversations**: Images from private conversations
+```
+output/
+├── posts/                  every BeReal, 3 files each (see below)
+├── realmojis/              your reaction selfies
+└── conversations/<id>/     images sent in private conversations
+```
 
-All images get proper EXIF metadata with:
-- Original timestamps (converted to local timezone using GPS when available)
-- GPS coordinates (when available)
-- Composited images with front camera overlaid on back camera (BeReal style with rounded corners and black border)
+**Every BeReal produces three files**, not one:
 
-The script automatically detects duplicate content between posts and memories to avoid saving the same image twice.
+- `2022-09-10_16-35-30_main-view.webp` - back camera
+- `2022-09-10_16-35-30_selfie-view.webp` - front camera
+- `2022-09-10_16-35-30_composited.webp` - the two combined, front overlaid on back with rounded corners and a black border, the way BeReal displayed it
+
+So ~2,000 BeReals becomes ~6,000 files. Worth knowing before you import the lot into a photo library, where all three will show up as separate items - most people only want the `_composited` ones. The filenames make that easy to filter on afterwards.
+
+Posts and memories are two views of the same BeReals (memories carry richer metadata - location and multiple timestamps), and both write into `posts/`. The script detects the overlap so you don't get duplicates.
+
+All images get EXIF metadata written with:
+- `DateTimeOriginal` / `CreateDate` set to the local time the photo was taken
+- GPS coordinates, where BeReal recorded them
+
+A small number of images referenced in the JSON are simply missing from BeReal's archive. Those print `File not found in expected locations:` and are skipped; the export carries on.
 
 ## Performance
 
