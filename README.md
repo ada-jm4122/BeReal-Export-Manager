@@ -121,7 +121,27 @@ python make_video.py --limit 100 -o test.mp4  # quick preview before committing 
 
 It reads `output/composited/` if you've run `organize_output.py`, otherwise the `_composited` files in `output/posts/`. Frames are ordered by the timestamp in the filename and normalized to one size (by default whichever size most of your images already are, so the bulk pass through untouched).
 
-Useful flags: `--fps` (default 10, so ~2,000 BeReals is about 3.5 minutes), `--size WxH`, `--crf` (quality, lower is bigger), `--timespan`, `--max-workers`.
+Useful flags: `--size WxH`, `--crf` (quality, lower is bigger), `--timespan`, `--max-workers`.
+
+### Picking a speed
+
+`--fps` is the one worth thinking about, because it decides how long each BeReal is on screen:
+
+| `--fps` | Per BeReal | ~2,200 BeReals | Feels like |
+|---|---|---|---|
+| 10 (default) | 0.1s | 3m 40s | A flipbook - a year goes past in seconds |
+| 6 | 0.17s | 6m 5s | Still fast, but faces register |
+| 4 | 0.25s | 9m 10s | You can actually look at each one |
+| 2 | 0.5s | 18m 20s | A slideshow |
+
+`-o` writes to a different file, so you can keep several cuts side by side rather than overwriting the last one:
+
+```sh
+python make_video.py --date-label                                # output/bereals.mp4
+python make_video.py --date-label --fps 4 -o output/bereals-slow.mp4
+```
+
+`--date-label` is worth adding on the slower cuts especially - at 0.1s a frame the date is a blur, but with a quarter second to read it, it turns the video into a timeline.
 
 This needs **ffmpeg** (`apt install ffmpeg` / `brew install ffmpeg` / [ffmpeg.org](https://ffmpeg.org/), or `--ffmpeg-path`). If your build has no libx264 - conda's doesn't - it falls back to libopenh264 at `--bitrate` instead, which still writes a normal MP4.
 
