@@ -203,7 +203,7 @@ class BeRealExporter:
 
     def convert_to_local_time(self, utc_dt: dt, location=None) -> dt:
         """
-        Converts UTC datetime to local timezone based on location or defaults to America/New_York.
+        Converts UTC datetime to local timezone based on location or defaults to Europe/London.
         """
         # Ensure the datetime is timezone-aware (UTC)
         if utc_dt.tzinfo is None:
@@ -212,7 +212,7 @@ class BeRealExporter:
             utc_dt = utc_dt.astimezone(pytz.UTC)
         
         # Default timezone
-        local_tz = pytz.timezone('America/New_York')
+        local_tz = pytz.timezone('Europe/London')
         
         # Try to get timezone from location if available
         if location and "latitude" in location and "longitude" in location:
@@ -226,11 +226,11 @@ class BeRealExporter:
                     local_tz = pytz.timezone(timezone_str)
                     self.verbose_msg(f"Using timezone {timezone_str} from GPS location")
                 else:
-                    self.verbose_msg("GPS location found but timezone lookup failed, using America/New_York")
+                    self.verbose_msg("GPS location found but timezone lookup failed, using Europe/London")
             except Exception as e:
-                self.verbose_msg(f"Error determining timezone from GPS: {e}, using America/New_York")
+                self.verbose_msg(f"Error determining timezone from GPS: {e}, using Europe/London")
         else:
-            self.verbose_msg("No GPS location, using America/New_York timezone")
+            self.verbose_msg("No GPS location, using Europe/London timezone")
         
         # Convert to local time and return naive datetime for EXIF
         local_dt = utc_dt.astimezone(local_tz)

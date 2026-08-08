@@ -9,7 +9,7 @@ I'm gonna be upfront and say it's BeReal's fault the dates are wonky on the outp
         "takenTime": "2024-12-24T01:27:16.726Z",
         "berealMoment": "2024-12-23T22:39:05.327Z",
 
-instead of the way everyone else always does it with UNIX Epoch time, but it makes it pretty hard to find out what time the picture was taken, and to properly tag the photos with the correct time. The script now handles timezone conversion automatically using GPS coordinates when available, falling back to America/New_York timezone.
+instead of the way everyone else always does it with UNIX Epoch time, but it makes it pretty hard to find out what time the picture was taken, and to properly tag the photos with the correct time. The script now handles timezone conversion automatically using GPS coordinates when available, falling back to Europe/London timezone.
 
 ## Installation
 
@@ -56,7 +56,7 @@ The script automatically finds your export folder and processes everything in pa
 - `--interactive-conversations`: Manually choose front/back camera for conversation images.
 - `--web-ui`: Use web UI for interactive conversation selection (requires `--interactive-conversations`).
 
-The script automatically handles timezone conversion using GPS coordinates when available, falling back to America/New_York. It creates composite images with the back camera as the main image and front camera overlaid in the corner with rounded edges and a black border, just like BeReal shows them.
+The script automatically handles timezone conversion using GPS coordinates when available, falling back to Europe/London. It creates composite images with the back camera as the main image and front camera overlaid in the corner with rounded edges and a black border, just like BeReal shows them.
 
 ## Examples
 
