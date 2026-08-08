@@ -109,6 +109,22 @@ output/
 
 Point it elsewhere with `--source`, e.g. `--source output/conversations/<id>`.
 
+## Stitching them into a video
+
+`make_video.py` turns every composited BeReal into a single MP4, oldest first:
+
+```sh
+python make_video.py                          # -> output/bereals.mp4
+python make_video.py --year 2024 --date-label # one year, date burned into each frame
+python make_video.py --limit 100 -o test.mp4  # quick preview before committing to the lot
+```
+
+It reads `output/composited/` if you've run `organize_output.py`, otherwise the `_composited` files in `output/posts/`. Frames are ordered by the timestamp in the filename and normalized to one size (by default whichever size most of your images already are, so the bulk pass through untouched).
+
+Useful flags: `--fps` (default 10, so ~2,000 BeReals is about 3.5 minutes), `--size WxH`, `--crf` (quality, lower is bigger), `--timespan`, `--max-workers`.
+
+This needs **ffmpeg** (`apt install ffmpeg` / `brew install ffmpeg` / [ffmpeg.org](https://ffmpeg.org/), or `--ffmpeg-path`). If your build has no libx264 - conda's doesn't - it falls back to libopenh264 at `--bitrate` instead, which still writes a normal MP4.
+
 ## Timezones
 
 Each photo's time comes from the GPS coordinates BeReal recorded with it, so it lands in whatever timezone you were actually standing in.
